@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { BookOpen, RotateCcw, AlertCircle } from "lucide-react";
+import { BookOpen, RotateCcw, AlertCircle, PlayCircle } from "lucide-react";
 import BriefForm from "./components/BriefForm";
 import PipelineProgress from "./components/PipelineProgress";
 import ArticleViewer from "./components/ArticleViewer";
@@ -7,7 +7,7 @@ import ExportButtons from "./components/ExportButtons";
 import { useArticleJob } from "./hooks/useArticleJob";
 
 export default function App() {
-  const { status, events, article, error, submit, reset } = useArticleJob();
+  const { status, events, article, error, submit, reset, runDemo } = useArticleJob();
   const [citationStyle, setCitationStyle] = useState("inline");
 
   // When article arrives, default citation style to what was requested
@@ -68,6 +68,17 @@ export default function App() {
             </div>
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
               <BriefForm onSubmit={submit} isLoading={false} />
+            </div>
+
+            <div className="text-center">
+              <p className="text-xs text-gray-400 mb-2">No API key? Preview the full UI with sample data.</p>
+              <button
+                onClick={runDemo}
+                className="inline-flex items-center gap-1.5 text-sm text-indigo-600 hover:text-indigo-800 font-medium"
+              >
+                <PlayCircle size={15} />
+                Run demo walkthrough
+              </button>
             </div>
           </div>
         )}
