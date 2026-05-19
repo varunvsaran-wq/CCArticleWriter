@@ -70,15 +70,32 @@ class ReviseRequest(BaseModel):
     content: str
     sources: list[Source]
     topic: Optional[str] = ""
+    job_id: Optional[str] = None
+    section_scope: Optional[str] = None  # exact section title to scope edits to
 
 
 @app.post("/api/revise")
 async def revise_article(request: ReviseRequest):
     sources_json = json.dumps([s.model_dump() for s in request.sources])
+
+    # If we still hold the originating job's runner in memory, lend the
+    # reviser its file tools so it can read research/synthesis files
+    # instead of re-searching the web from scratch.
+    read_file = None
+    list_files = None
+    if request.job_id:
+        runner = _jobs.get(request.job_id)
+        if runner:
+            read_file = runner._read_file
+            list_files = runner._list_files
+
     revised_content, revised_sources = await run_reviser(
         instruction=request.instruction,
         content=request.content,
         sources_json=sources_json,
+        section_scope=request.section_scope,
+        read_file=read_file,
+        list_files=list_files,
     )
     return {
         "content": revised_content,

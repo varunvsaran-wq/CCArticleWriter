@@ -18,6 +18,8 @@ from ..tools.web_search import web_search
 
 JOBS_DIR = Path("jobs")
 
+CITE_PATTERN = re.compile(r"\[CITE:([^\]]+)\]")
+
 
 class PipelineRunner:
     def __init__(self, brief: ArticleBrief):
@@ -31,6 +33,10 @@ class PipelineRunner:
         self._events: list[dict] = []
         self._event_available = asyncio.Event()
         self._finished = False
+
+        # Structured outputs cached from agents that use submit_* tools
+        self._synthesis: dict | None = None
+        self._outline: dict | None = None
 
         self._read_file, self._write_file, self._list_files = make_file_tools(str(self.job_dir))
 
@@ -142,19 +148,13 @@ special_requirements: {brief.special_requirements or 'none'}
     async def _phase_synthesis(self) -> None:
         await self.emit("phase_start", "Synthesizing research into knowledge map…", phase="synthesis")
 
-        await run_synthesizer(
+        self._synthesis = await run_synthesizer(
             tool_impls=self.tool_impls,
             on_log=self.make_logger("synthesizer"),
         )
 
-        # Check for critical gaps and run one targeted research pass if needed
-        gaps_raw = await self._read_file("state/gaps.json")
-        try:
-            gaps = json.loads(gaps_raw)
-            critical = [g["question"] for g in gaps if g.get("critical")]
-        except Exception:
-            critical = []
-
+        # Fill critical gaps with one extra research pass, then re-synthesize
+        critical = [g["question"] for g in self._synthesis.get("gaps", []) if g.get("critical")]
         if critical:
             await self.emit("agent_log", f"Filling {len(critical)} critical gap(s)…", agent="orchestrator")
             gap_angle = "; ".join(critical[:3])
@@ -166,7 +166,9 @@ special_requirements: {brief.special_requirements or 'none'}
                 variant="targeted",
                 on_log=self.make_logger("researcher_gaps"),
             )
-            await run_synthesizer(tool_impls=self.tool_impls, on_log=self.make_logger("synthesizer"))
+            self._synthesis = await run_synthesizer(
+                tool_impls=self.tool_impls, on_log=self.make_logger("synthesizer")
+            )
 
         await self.emit("phase_complete", "Synthesis complete.", phase="synthesis")
 
@@ -181,7 +183,7 @@ special_requirements: {brief.special_requirements or 'none'}
             f"Special requirements: {self.brief.special_requirements or 'none'}"
         )
 
-        await run_outliner(
+        self._outline = await run_outliner(
             brief_summary=brief_summary,
             content_type=self.brief.content_type,
             tool_impls=self.tool_impls,
@@ -193,7 +195,7 @@ special_requirements: {brief.special_requirements or 'none'}
     async def _phase_write(self) -> None:
         await self.emit("phase_start", "Writing article sections in parallel…", phase="writing")
 
-        sections = await self._parse_outline_sections()
+        sections = self._sections_from_outline()
         if not sections:
             sections = [{"title": "Article", "index": 1}]
 
@@ -234,28 +236,38 @@ special_requirements: {brief.special_requirements or 'none'}
         await self.emit("phase_complete", "Editing complete.", phase="editing")
 
     async def _phase_finalize(self) -> None:
-        await self.emit("phase_start", "Assembling final output…", phase="finalizing")
+        await self.emit("phase_start", "Post-processing citations and assembling output…", phase="finalizing")
 
-        content = await self._read_file("output/article.md")
-        sources_raw = await self._read_file("output/sources.json")
+        edited = await self._read_file("output/article.md")
+        if edited.startswith("File not found"):
+            # Fall back to the assembled draft if editor failed to write
+            edited = await self._read_file("output/draft_full.md")
 
-        # Fall back to state/sources.json if editor didn't write output/sources.json
-        if sources_raw.startswith("File not found"):
+        all_sources = self._synthesis.get("sources", []) if self._synthesis else []
+        if not all_sources:
             sources_raw = await self._read_file("state/sources.json")
+            try:
+                all_sources = json.loads(sources_raw)
+            except Exception:
+                all_sources = []
+
+        final_text, cited_sources = self._postprocess_citations(edited, all_sources)
+
+        await self._write_file("output/article.md", final_text)
+        await self._write_file("output/sources.json", json.dumps(cited_sources, indent=2))
 
         try:
-            sources_data = json.loads(sources_raw)
-            sources = [Source(**s) for s in sources_data]
+            sources = [Source(**s) for s in cited_sources]
         except Exception:
             sources = []
 
-        title = self._extract_title(content)
-        word_count = len(content.split())
+        title = self._extract_title(final_text)
+        word_count = len(final_text.split())
 
         article = Article(
             id=self.job_id,
             title=title,
-            content=content,
+            content=final_text,
             sources=sources,
             word_count=word_count,
             content_type=self.brief.content_type,
@@ -275,10 +287,11 @@ special_requirements: {brief.special_requirements or 'none'}
     # ──────────────────────────────────────────────
 
     async def _plan_angles(self) -> list[str]:
-        import anthropic
-        client = anthropic.AsyncAnthropic()
+        from ..agents.base import get_client, call_with_retry
+        client = get_client()
         brief = self.brief
-        response = await client.messages.create(
+        response = await call_with_retry(
+            client,
             model="claude-sonnet-4-6",
             max_tokens=512,
             messages=[{
@@ -299,18 +312,13 @@ special_requirements: {brief.special_requirements or 'none'}
         except Exception:
             return [brief.topic]
 
-    async def _parse_outline_sections(self) -> list[dict]:
-        outline = await self._read_file("outline/outline.md")
-        if outline.startswith("File not found"):
+    def _sections_from_outline(self) -> list[dict]:
+        if not self._outline:
             return []
-        sections = []
-        idx = 1
-        for line in outline.splitlines():
-            m = re.match(r"^## Section \d+:\s*(.+)", line)
-            if m:
-                sections.append({"title": m.group(1).strip(), "index": idx})
-                idx += 1
-        return sections
+        return [
+            {"title": s.get("title", f"Section {i}"), "index": i}
+            for i, s in enumerate(self._outline.get("sections", []), start=1)
+        ]
 
     @staticmethod
     def _extract_title(content: str) -> str:
@@ -318,3 +326,58 @@ special_requirements: {brief.special_requirements or 'none'}
             if line.startswith("# "):
                 return line[2:].strip()
         return "Untitled Article"
+
+    @staticmethod
+    def _postprocess_citations(
+        article_text: str, all_sources: list[dict]
+    ) -> tuple[str, list[dict]]:
+        """Renumber [CITE:id] markers to sequential [N] and filter sources.
+
+        - First occurrence of each id becomes [1], next new id becomes [2], etc.
+        - Invalid ids (not in all_sources) are dropped.
+        - Returns (final_text, cited_sources_renumbered_in_order).
+        """
+        by_id = {str(s.get("id")): s for s in all_sources}
+
+        seen: list[str] = []
+        id_to_n: dict[str, int] = {}
+
+        for m in CITE_PATTERN.finditer(article_text):
+            sid = m.group(1).strip()
+            if sid not in by_id or sid in id_to_n:
+                continue
+            id_to_n[sid] = len(seen) + 1
+            seen.append(sid)
+
+        def _repl(m: re.Match) -> str:
+            sid = m.group(1).strip()
+            n = id_to_n.get(sid)
+            return f"[{n}]" if n is not None else ""
+
+        body = CITE_PATTERN.sub(_repl, article_text)
+
+        cited: list[dict] = []
+        for orig_id in seen:
+            src = dict(by_id[orig_id])
+            src["id"] = str(id_to_n[orig_id])
+            cited.append(src)
+
+        # Strip any existing ## References section the editor wrote
+        body = re.split(r"\n##\s+References\s*\n", body, maxsplit=1)[0].rstrip()
+
+        # Append a deterministic References section
+        if cited:
+            ref_lines = ["", "## References", ""]
+            for s in cited:
+                parts = [f"[{s['id']}] {s.get('title') or 'Untitled'}"]
+                if s.get("publication"):
+                    parts.append(s["publication"])
+                if s.get("date"):
+                    parts.append(s["date"])
+                if s.get("url"):
+                    parts.append(s["url"])
+                ref_lines.append(" — ".join(parts))
+                ref_lines.append("")
+            body = body + "\n" + "\n".join(ref_lines)
+
+        return body, cited

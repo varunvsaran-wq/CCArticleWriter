@@ -33,6 +33,25 @@
   line-height: 0;
 }
 
+/* TipTap (ProseMirror) editor surface */
+.ProseMirror {
+  @apply outline-none;
+}
+.ProseMirror.article-content h2 {
+  @apply mt-6;  /* tighter heading spacing inside the editor */
+}
+.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  @apply text-gray-400 pointer-events-none float-left h-0;
+}
+.ProseMirror :where(p, h1, h2, h3, ul, ol, blockquote):focus {
+  @apply outline-none;
+}
+/* Subtle outline on the editor when focused */
+.ProseMirror-focused { outline: none; }
+/* Selected text */
+.ProseMirror ::selection { background: rgba(99, 102, 241, 0.2); }
+
 /* Scroll fade for progress log */
 .log-fade { mask-image: linear-gradient(to bottom, transparent, black 2rem); }
 

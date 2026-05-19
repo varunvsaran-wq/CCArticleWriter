@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 
-function makeVersion(article, name, instruction = null, auto = false) {
+function makeVersion(article, name, instruction = null, auto = false, kind = "snapshot") {
   return {
     id: crypto.randomUUID(),
     name,
@@ -10,8 +10,11 @@ function makeVersion(article, name, instruction = null, auto = false) {
     savedAt: new Date().toISOString(),
     instruction,
     auto,
+    kind, // "snapshot" | "auto-before" | "auto-after" | "manual-edit"
   };
 }
+
+const MANUAL_EDIT_WINDOW_MS = 2 * 60 * 1000; // collapse rapid edits into one version
 
 function storageKey(articleId) {
   return `article-versions-${articleId}`;
@@ -81,10 +84,48 @@ export function useVersionHistory() {
 
   const addRevision = useCallback((article, instruction) => {
     const label = `After: ${instruction.slice(0, 40)}${instruction.length > 40 ? "…" : ""}`;
-    const v = makeVersion(article, label, instruction, false);
+    const v = makeVersion(article, label, instruction, false, "auto-after");
     _setAndPersist((prev) => [...prev, v]);
     setCurrentId(v.id);
     return v.id;
+  }, [_setAndPersist]);
+
+  /**
+   * Save a direct manual edit. Collapses rapid edits: if the latest version
+   * is a manual edit younger than MANUAL_EDIT_WINDOW_MS, update it in place
+   * instead of appending a new version.
+   */
+  const saveEdit = useCallback((article) => {
+    let appendedId = null;
+    _setAndPersist((prev) => {
+      const last = prev[prev.length - 1];
+      const lastIsRecentEdit =
+        last &&
+        last.kind === "manual-edit" &&
+        Date.now() - new Date(last.savedAt).getTime() < MANUAL_EDIT_WINDOW_MS;
+
+      if (lastIsRecentEdit) {
+        const updated = {
+          ...last,
+          content: article.content,
+          sources: article.sources,
+          word_count: article.word_count,
+          savedAt: new Date().toISOString(),
+        };
+        appendedId = updated.id;
+        return [...prev.slice(0, -1), updated];
+      }
+
+      const timeLabel = new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      const v = makeVersion(article, `Edit at ${timeLabel}`, null, true, "manual-edit");
+      appendedId = v.id;
+      return [...prev, v];
+    });
+    if (appendedId) setCurrentId(appendedId);
+    return appendedId;
   }, [_setAndPersist]);
 
   const restoreVersion = useCallback((id) => {
@@ -114,6 +155,7 @@ export function useVersionHistory() {
     saveVersion,
     autoSave,
     addRevision,
+    saveEdit,
     restoreVersion,
     renameVersion,
     deleteVersion,

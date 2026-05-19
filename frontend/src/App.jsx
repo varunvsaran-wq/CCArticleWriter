@@ -9,7 +9,7 @@ import { useArticleJob } from "./hooks/useArticleJob";
 import { useVersionHistory } from "./hooks/useVersionHistory";
 
 export default function App() {
-  const { status, events, article: generatedArticle, error, submit, reset, runDemo } = useArticleJob();
+  const { status, events, article: generatedArticle, jobId, error, submit, reset, runDemo } = useArticleJob();
   const [citationStyle, setCitationStyle] = useState("inline");
 
   // Working article — may be a restored version different from generated
@@ -23,6 +23,7 @@ export default function App() {
     saveVersion,
     autoSave,
     addRevision,
+    saveEdit,
     restoreVersion,
     renameVersion,
     deleteVersion,
@@ -56,6 +57,13 @@ export default function App() {
     if (workingArticle) autoSave(workingArticle, instruction);
     setWorkingArticle(revisedArticle);
     addRevision(revisedArticle, instruction);
+  };
+
+  const handleContentEdit = (editedArticle) => {
+    // Debounced auto-save from the rich-text editor.
+    // useVersionHistory.saveEdit collapses rapid edits into one version.
+    setWorkingArticle(editedArticle);
+    saveEdit(editedArticle);
   };
 
   const handleSaveVersion = (name) => {
@@ -224,7 +232,9 @@ export default function App() {
               <ArticleEditor
                 article={displayArticle}
                 citationStyle={citationStyle}
+                jobId={jobId}
                 onRevisionComplete={handleRevisionComplete}
+                onContentEdit={handleContentEdit}
               />
             </div>
           </div>

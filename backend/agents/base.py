@@ -1,6 +1,8 @@
+import asyncio
 import json
 from typing import Callable, Awaitable
 import anthropic
+from anthropic import APIConnectionError, APIStatusError, RateLimitError
 
 _client: anthropic.AsyncAnthropic | None = None
 
@@ -10,6 +12,32 @@ def get_client() -> anthropic.AsyncAnthropic:
     if _client is None:
         _client = anthropic.AsyncAnthropic()
     return _client
+
+
+async def call_with_retry(client: anthropic.AsyncAnthropic, **kwargs):
+    """Call client.messages.create with exponential backoff on transient errors.
+
+    Retries on: rate limits, connection errors, and 5xx responses.
+    Total wait across retries: ~31s (1, 2, 4, 8, 16).
+    """
+    delays = [1, 2, 4, 8, 16]
+    last_exc: Exception | None = None
+    for attempt in range(len(delays) + 1):
+        try:
+            return await client.messages.create(**kwargs)
+        except RateLimitError as e:
+            last_exc = e
+        except APIConnectionError as e:
+            last_exc = e
+        except APIStatusError as e:
+            if e.status_code and e.status_code >= 500:
+                last_exc = e
+            else:
+                raise
+        if attempt < len(delays):
+            await asyncio.sleep(delays[attempt])
+    assert last_exc is not None
+    raise last_exc
 
 
 TOOL_SCHEMAS: dict[str, dict] = {
@@ -102,7 +130,8 @@ async def run_agent(
     last_text = ""
 
     for _ in range(max_iterations):
-        response = await client.messages.create(
+        response = await call_with_retry(
+            client,
             model=model,
             system=system_prompt,
             messages=messages,

@@ -9,6 +9,7 @@ export function useArticleJob() {
   const [status, setStatus] = useState("idle"); // idle | loading | streaming | done | error
   const [events, setEvents] = useState([]);
   const [article, setArticle] = useState(null);
+  const [jobId, setJobId] = useState(null);
   const [error, setError] = useState(null);
   const esRef = useRef(null);
   const mockAbortRef = useRef(false);
@@ -22,6 +23,7 @@ export function useArticleJob() {
     setStatus("idle");
     setEvents([]);
     setArticle(null);
+    setJobId(null);
     setError(null);
   }, []);
 
@@ -29,6 +31,7 @@ export function useArticleJob() {
     reset();
     mockAbortRef.current = false;
     setStatus("streaming");
+    setJobId("demo");
 
     for await (const event of streamMockEvents()) {
       if (mockAbortRef.current) break;
@@ -56,6 +59,7 @@ export function useArticleJob() {
 
       if (!res.ok) throw new Error(`Server error: ${res.status}`);
       const { job_id } = await res.json();
+      setJobId(job_id);
 
       setStatus("streaming");
 
@@ -93,5 +97,5 @@ export function useArticleJob() {
     }
   }, [reset]);
 
-  return { status, events, article, error, submit, reset, runDemo };
+  return { status, events, article, jobId, error, submit, reset, runDemo };
 }

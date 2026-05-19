@@ -1,28 +1,45 @@
 import json
-import anthropic
+from typing import Optional, Callable
+
 from .base import get_client
+from .style_guide import ANTI_AI_VOICE_GUIDE
 from ..tools.web_search import web_search
 from ..tools.web_fetch import web_fetch
 
-SYSTEM_PROMPT = """\
+SYSTEM_PROMPT = f"""\
 You are a Revision Agent for a long-form article editor.
 
-You receive:
-1. The current article in markdown format
+## INPUTS YOU RECEIVE
+
+1. The current article in markdown
 2. A JSON array of sources used in the article
 3. A revision instruction from the user
+4. Optionally: a SECTION SCOPE — the title of a single section to revise
+5. Optionally: read_file / list_files tools — if available, the original job's
+   research files are accessible. PREFER reading those over fresh web search.
 
-Your job:
+## YOUR JOB
+
 - Apply ONLY the changes the instruction asks for — be surgical
-- If the instruction needs new information (e.g. "add a section about X"), call web_search
-- Keep the article's existing tone, style, and structure intact elsewhere
-- Maintain [N] citation markers consistently; append new sources with new sequential IDs
-- When finished, call submit_revision() with the COMPLETE revised article
+- If SECTION SCOPE is given, change ONLY that section. All other sections
+  must appear in the output exactly as-is.
+- If the instruction needs new information:
+    a) First, if read_file is available, list research files and read the
+       most relevant ones — the original job already searched for this topic.
+    b) Only if research files don't have it, call web_search.
+- Keep tone, style, and structure intact elsewhere
+- Maintain [N] citation markers; append new sources with new sequential IDs
+- Re-apply the VOICE guide to any rewritten passage
+- When done, call submit_revision() with the COMPLETE revised article
 
-Rules:
+## RULES
+
 - Never remove content unless asked
-- Never invent facts — search for them
-- The submission must be the full article, not just the changed parts
+- Never invent facts — search or read for them
+- The submission must be the FULL article, not just the changed part
+- If you change just one section, copy the rest of the article verbatim
+
+{ANTI_AI_VOICE_GUIDE}
 """
 
 SUBMIT_TOOL = {
@@ -49,7 +66,7 @@ SUBMIT_TOOL = {
 
 WEB_SEARCH_TOOL = {
     "name": "web_search",
-    "description": "Search the web for new information needed by the revision.",
+    "description": "Search the web for new information needed by the revision. Use only if research files don't have what you need.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -73,23 +90,71 @@ WEB_FETCH_TOOL = {
     },
 }
 
+READ_FILE_TOOL = {
+    "name": "read_file",
+    "description": "Read a file from the original job's working directory (research notes, knowledge map, sources). PREFER this over web_search.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+    },
+}
+
+LIST_FILES_TOOL = {
+    "name": "list_files",
+    "description": "List files in a directory of the original job's working directory.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"directory": {"type": "string", "default": "."}},
+        "required": [],
+    },
+}
+
 
 async def run_reviser(
     instruction: str,
     content: str,
     sources_json: str,
+    section_scope: Optional[str] = None,
+    read_file: Optional[Callable] = None,
+    list_files: Optional[Callable] = None,
 ) -> tuple[str, list]:
-    """Run the revision agent. Returns (revised_content, sources_list)."""
+    """Run the revision agent. Returns (revised_content, sources_list).
+
+    If read_file / list_files are provided, the reviser can access the
+    original job's research files — reducing redundant web searches.
+    """
     client = get_client()
 
     tools = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL, SUBMIT_TOOL]
+    if read_file:
+        tools.insert(0, READ_FILE_TOOL)
+    if list_files:
+        tools.insert(0, LIST_FILES_TOOL)
+
+    scope_note = ""
+    if section_scope:
+        scope_note = (
+            f"\n\nSECTION SCOPE: Revise ONLY the section titled \"{section_scope}\". "
+            "Every other section must appear in the output unchanged."
+        )
+
+    file_note = ""
+    if read_file:
+        file_note = (
+            "\n\nNOTE: The original job's research files are available via read_file / list_files. "
+            "Try `list_files(\"research\")` and `read_file(\"synthesis/knowledge_map.md\")` first — "
+            "the answer to your instruction is probably already there."
+        )
+
     messages = [
         {
             "role": "user",
             "content": (
                 f"Current article:\n\n{content}\n\n"
                 f"Current sources (JSON):\n{sources_json}\n\n"
-                f"Revision instruction: {instruction}\n\n"
+                f"Revision instruction: {instruction}"
+                f"{scope_note}{file_note}\n\n"
                 "Apply the revision, then call submit_revision()."
             ),
         }
@@ -125,6 +190,10 @@ async def run_reviser(
                     result = await web_search(**inp)
                 elif name == "web_fetch":
                     result = await web_fetch(**inp)
+                elif name == "read_file" and read_file:
+                    result = await read_file(**inp)
+                elif name == "list_files" and list_files:
+                    result = await list_files(**inp)
                 else:
                     result = f"Unknown tool: {name}"
 
@@ -138,7 +207,6 @@ async def run_reviser(
             messages.append({"role": "user", "content": tool_results})
 
         elif response.stop_reason == "end_turn":
-            # Model ended without calling submit_revision — use text as content
             text = "".join(b.text for b in response.content if hasattr(b, "text"))
             return text or content, json.loads(sources_json)
 
