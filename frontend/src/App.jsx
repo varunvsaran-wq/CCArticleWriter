@@ -1,35 +1,89 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { BookOpen, RotateCcw, AlertCircle, PlayCircle } from "lucide-react";
 import BriefForm from "./components/BriefForm";
 import PipelineProgress from "./components/PipelineProgress";
-import ArticleViewer from "./components/ArticleViewer";
+import ArticleEditor from "./components/ArticleEditor";
+import VersionHistory from "./components/VersionHistory";
 import ExportButtons from "./components/ExportButtons";
 import { useArticleJob } from "./hooks/useArticleJob";
+import { useVersionHistory } from "./hooks/useVersionHistory";
 
 export default function App() {
-  const { status, events, article, error, submit, reset, runDemo } = useArticleJob();
+  const { status, events, article: generatedArticle, error, submit, reset, runDemo } = useArticleJob();
   const [citationStyle, setCitationStyle] = useState("inline");
 
-  // When article arrives, default citation style to what was requested
-  const handleArticleReady = (art) => {
-    setCitationStyle(art.citation_style ?? "inline");
+  // Working article — may be a restored version different from generated
+  const [workingArticle, setWorkingArticle] = useState(null);
+
+  const {
+    versions,
+    currentId,
+    currentVersion,
+    initialize,
+    saveVersion,
+    autoSave,
+    addRevision,
+    restoreVersion,
+    renameVersion,
+    deleteVersion,
+  } = useVersionHistory();
+
+  // When generation finishes, initialise working article and version history
+  useEffect(() => {
+    if (generatedArticle && !workingArticle) {
+      setWorkingArticle(generatedArticle);
+      setCitationStyle(generatedArticle.citation_style ?? "inline");
+      initialize(generatedArticle);
+    }
+  }, [generatedArticle, workingArticle, initialize]);
+
+  // When user restores a version, update the working article
+  const handleRestore = (id) => {
+    restoreVersion(id);
+    const v = versions.find((v) => v.id === id);
+    if (v) {
+      setWorkingArticle({
+        ...workingArticle,
+        content: v.content,
+        sources: v.sources,
+        word_count: v.word_count,
+      });
+    }
   };
 
-  // Sync citation style when article is first loaded
-  if (article && citationStyle === "inline" && article.citation_style !== "inline") {
-    setCitationStyle(article.citation_style);
-  }
+  const handleRevisionComplete = (revisedArticle, instruction) => {
+    // Auto-save the current state before applying the revision
+    if (workingArticle) autoSave(workingArticle, instruction);
+    setWorkingArticle(revisedArticle);
+    addRevision(revisedArticle, instruction);
+  };
 
-  const isIdle = status === "idle";
+  const handleSaveVersion = (name) => {
+    if (workingArticle) saveVersion(workingArticle, name);
+  };
+
+  const handleReset = () => {
+    setWorkingArticle(null);
+    reset();
+    // version history resets automatically because workingArticle → null
+    // and initialize() will be called again when the next article arrives
+  };
+
+  const isIdle    = status === "idle";
   const isRunning = status === "loading" || status === "streaming";
-  const isDone = status === "done";
-  const isError = status === "error";
+  const isDone    = status === "done" && !!workingArticle;
+  const isError   = status === "error";
+
+  // Display article is the current version's content merged into workingArticle shape
+  const displayArticle = currentVersion
+    ? { ...workingArticle, content: currentVersion.content, sources: currentVersion.sources, word_count: currentVersion.word_count }
+    : workingArticle;
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 flex flex-col">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
+      <header className="bg-white border-b border-gray-200 sticky top-0 z-20">
+        <div className="max-w-[1400px] mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="bg-indigo-600 text-white rounded-lg p-1.5">
               <BookOpen size={18} />
@@ -40,20 +94,30 @@ export default function App() {
             </div>
           </div>
 
-          {!isIdle && (
-            <button
-              onClick={reset}
-              className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50 transition-colors"
-            >
-              <RotateCcw size={12} />
-              New article
-            </button>
-          )}
+          <div className="flex items-center gap-3">
+            {isDone && (
+              <ExportButtons
+                article={displayArticle}
+                citationStyle={citationStyle}
+                onCitationStyleChange={setCitationStyle}
+              />
+            )}
+            {!isIdle && (
+              <button
+                onClick={handleReset}
+                className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50 transition-colors"
+              >
+                <RotateCcw size={12} />
+                New article
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
-        {/* IDLE — show brief form centered */}
+      <main className="flex-1 max-w-[1400px] mx-auto w-full px-4 sm:px-6 py-8">
+
+        {/* ── IDLE ── */}
         {isIdle && (
           <div className="max-w-xl mx-auto">
             <div className="text-center mb-8">
@@ -62,15 +126,13 @@ export default function App() {
               </h2>
               <p className="text-gray-500 text-sm leading-relaxed">
                 Describe your topic and a team of AI agents will research the web,
-                synthesize sources, and write a fully cited article — the same iterative
-                approach as Claude Code, applied to writing.
+                synthesize sources, and write a fully cited, editable article.
               </p>
             </div>
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
               <BriefForm onSubmit={submit} isLoading={false} />
             </div>
-
-            <div className="text-center">
+            <div className="text-center mt-5">
               <p className="text-xs text-gray-400 mb-2">No API key? Preview the full UI with sample data.</p>
               <button
                 onClick={runDemo}
@@ -83,7 +145,7 @@ export default function App() {
           </div>
         )}
 
-        {/* RUNNING — two-column: progress left, placeholder right */}
+        {/* ── RUNNING ── */}
         {isRunning && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
@@ -108,7 +170,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ERROR */}
+        {/* ── ERROR ── */}
         {isError && (
           <div className="max-w-xl mx-auto">
             <div className="bg-red-50 border border-red-200 rounded-xl p-6 flex gap-3">
@@ -116,10 +178,7 @@ export default function App() {
               <div>
                 <p className="font-medium text-red-800 text-sm">Pipeline error</p>
                 <p className="text-red-600 text-sm mt-1">{error}</p>
-                <button
-                  onClick={reset}
-                  className="mt-3 text-xs text-red-700 underline hover:text-red-900"
-                >
+                <button onClick={handleReset} className="mt-3 text-xs text-red-700 underline hover:text-red-900">
                   Try again
                 </button>
               </div>
@@ -127,43 +186,52 @@ export default function App() {
           </div>
         )}
 
-        {/* DONE — progress summary + full article */}
-        {isDone && article && (
-          <div className="space-y-6">
-            {/* Toolbar */}
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm px-5 py-3 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="text-base font-bold text-gray-900 leading-tight">{article.title}</h2>
-                <p className="text-xs text-gray-500 mt-0.5">Generation complete</p>
-              </div>
-              <ExportButtons
-                article={article}
-                citationStyle={citationStyle}
-                onCitationStyleChange={setCitationStyle}
-              />
-            </div>
+        {/* ── DONE — Editor layout ── */}
+        {isDone && displayArticle && (
+          <div className="grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-6 h-[calc(100vh-8rem)]">
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Sidebar: pipeline summary */}
-              <div className="lg:col-span-1 space-y-4">
-                <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-                  <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-4">
-                    Pipeline Summary
-                  </h3>
-                  <PipelineProgress events={events} />
+            {/* Left column: version history */}
+            <div className="flex flex-col gap-4 overflow-y-auto">
+              <VersionHistory
+                versions={versions}
+                currentId={currentId}
+                onRestore={handleRestore}
+                onSave={handleSaveVersion}
+                onRename={renameVersion}
+                onDelete={deleteVersion}
+              />
+
+              {/* Article meta */}
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+                <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-2">Article</p>
+                <p className="text-sm font-semibold text-gray-800 leading-snug">{displayArticle.title}</p>
+                <div className="flex flex-wrap gap-2 mt-3">
+                  <span className="text-[10px] bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
+                    {displayArticle.word_count?.toLocaleString()} words
+                  </span>
+                  <span className="text-[10px] bg-gray-100 text-gray-600 px-2 py-0.5 rounded capitalize">
+                    {displayArticle.content_type}
+                  </span>
+                  <span className="text-[10px] bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
+                    {displayArticle.sources?.length} sources
+                  </span>
                 </div>
               </div>
+            </div>
 
-              {/* Main: article */}
-              <div className="lg:col-span-2 bg-white rounded-xl border border-gray-200 shadow-sm p-6 sm:p-8">
-                <ArticleViewer article={article} citationStyle={citationStyle} />
-              </div>
+            {/* Right column: article editor */}
+            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col">
+              <ArticleEditor
+                article={displayArticle}
+                citationStyle={citationStyle}
+                onRevisionComplete={handleRevisionComplete}
+              />
             </div>
           </div>
         )}
       </main>
 
-      <footer className="text-center text-xs text-gray-400 py-8">
+      <footer className="text-center text-xs text-gray-400 py-6">
         Article Writer · Multi-agent pipeline powered by Claude
       </footer>
     </div>
