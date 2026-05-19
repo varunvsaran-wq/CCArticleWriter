@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
-import { Send, Loader2, AlertCircle, ChevronDown, Highlighter } from "lucide-react";
+import { Send, Loader2, AlertCircle, ChevronDown, Highlighter, FileText, Sigma, Download } from "lucide-react";
 import RichTextEditor from "./RichTextEditor";
+import LatexEditor from "./LatexEditor";
 import SourcesPanel from "./SourcesPanel";
 import {
   splitBodyAndRefs,
@@ -8,6 +9,7 @@ import {
   countWords,
 } from "../utils/markdown";
 import { rewriteReferences } from "../utils/citations";
+import { markdownToLatex } from "../utils/latex";
 
 const PLACEHOLDERS = [
   "Make the introduction more engaging…",
@@ -32,9 +34,11 @@ export default function ArticleEditor({
   onContentEdit,
 }) {
   const editorRef = useRef(null);
+  const latexEditorRef = useRef(null);
   const debounceRef = useRef(null);
   const textareaRef = useRef(null);
 
+  const [format, setFormat] = useState("markdown"); // "markdown" | "latex"
   const [instruction, setInstruction] = useState("");
   const [sectionScope, setSectionScope] = useState("");
   // scope kinds: "whole" | "section" | "selection". Derived from sectionScope + selection.
@@ -52,6 +56,40 @@ export default function ArticleEditor({
     const { body } = splitBodyAndRefs(article.content);
     return { body, sections: extractSections(body) };
   }, [article.content]);
+
+  // LaTeX source — regenerated from the full article (body + references) when
+  // the user enters LaTeX mode, or whenever the article changes while in LaTeX mode.
+  const latexSource = useMemo(() => {
+    if (format !== "latex") return "";
+    const full = rewriteReferences(body, article.sources, citationStyle);
+    return markdownToLatex(full, article.title);
+  }, [format, body, article.sources, article.title, citationStyle]);
+
+  const handleFormatChange = (next) => {
+    if (next === format) return;
+    if (next === "markdown" && latexEditorRef.current?.isDirty?.()) {
+      if (!window.confirm("You have unsaved LaTeX edits. Switching back to Markdown will discard them. Continue?")) {
+        return;
+      }
+    }
+    setFormat(next);
+  };
+
+  const handleDownloadLatex = () => {
+    const tex = latexEditorRef.current?.getLatex?.() ?? latexSource;
+    const blob = new Blob([tex], { type: "application/x-tex;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const slug = (article.title || "article")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 60) || "article";
+    a.href = url;
+    a.download = `${slug}.tex`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   // Reset scope if the article structure changes and the scoped section is gone
   useEffect(() => {
@@ -230,31 +268,82 @@ export default function ArticleEditor({
 
   return (
     <div className="flex flex-col h-full">
-      {/* Scroll area: toolbar (sticky) + editor + sources */}
-      <div className="flex-1 overflow-y-auto relative">
-        {isRevising && (
-          <div className="absolute inset-0 bg-white/80 backdrop-blur-sm z-20 flex flex-col items-center justify-center gap-3">
-            <Loader2 size={28} className="text-indigo-500 animate-spin" />
-            <p className="text-sm text-gray-600 font-medium">
-              Revising {sectionScope ? `"${sectionScope}"` : "article"}…
-            </p>
-            <p className="text-xs text-gray-400 max-w-xs text-center">
-              "{instruction.slice(0, 80)}{instruction.length > 80 ? "…" : ""}"
-            </p>
+      {/* Format tabs */}
+      <div className="flex items-center gap-1 border-b border-gray-200 bg-white px-3 py-2 flex-shrink-0">
+        <button
+          onClick={() => handleFormatChange("markdown")}
+          className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md transition-colors ${
+            format === "markdown"
+              ? "bg-indigo-100 text-indigo-700 font-semibold"
+              : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"
+          }`}
+        >
+          <FileText size={12} />
+          Markdown
+        </button>
+        <button
+          onClick={() => handleFormatChange("latex")}
+          className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md transition-colors ${
+            format === "latex"
+              ? "bg-indigo-100 text-indigo-700 font-semibold"
+              : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"
+          }`}
+        >
+          <Sigma size={12} />
+          LaTeX
+        </button>
+        {format === "latex" && (
+          <div className="ml-auto flex items-center gap-3">
+            <span className="text-[10px] text-gray-400 italic hidden sm:inline">
+              Preview-only · download .tex to keep your edits
+            </span>
+            <button
+              onClick={handleDownloadLatex}
+              className="flex items-center gap-1.5 text-xs px-2.5 py-1 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
+              title="Download as .tex"
+            >
+              <Download size={12} />
+              .tex
+            </button>
           </div>
         )}
-
-        <RichTextEditor
-          ref={editorRef}
-          initialMarkdown={body}
-          onMarkdownChange={handleMarkdownChange}
-          onSelectionChange={setSelection}
-        />
-
-        <SourcesPanel sources={article.sources} citationStyle={citationStyle} />
       </div>
 
-      {/* Revision bar — sticky bottom */}
+      {/* Editor body */}
+      {format === "markdown" ? (
+        <div className="flex-1 overflow-y-auto relative">
+          {isRevising && (
+            <div className="absolute inset-0 bg-white/80 backdrop-blur-sm z-20 flex flex-col items-center justify-center gap-3">
+              <Loader2 size={28} className="text-indigo-500 animate-spin" />
+              <p className="text-sm text-gray-600 font-medium">
+                Revising {sectionScope ? `"${sectionScope}"` : "article"}…
+              </p>
+              <p className="text-xs text-gray-400 max-w-xs text-center">
+                "{instruction.slice(0, 80)}{instruction.length > 80 ? "…" : ""}"
+              </p>
+            </div>
+          )}
+
+          <RichTextEditor
+            ref={editorRef}
+            initialMarkdown={body}
+            onMarkdownChange={handleMarkdownChange}
+            onSelectionChange={setSelection}
+          />
+
+          <SourcesPanel sources={article.sources} citationStyle={citationStyle} />
+        </div>
+      ) : (
+        <div className="flex-1 min-h-0">
+          <LatexEditor
+            ref={latexEditorRef}
+            initialLatex={latexSource}
+          />
+        </div>
+      )}
+
+      {/* Revision bar — markdown mode only (the agent reviser operates on markdown) */}
+      {format === "markdown" && (
       <div className="border-t border-gray-200 bg-gray-50 px-4 py-3 flex-shrink-0">
         {revisionError && (
           <div className="flex items-center gap-2 text-xs text-red-600 mb-2 bg-red-50 rounded-lg px-3 py-2">
@@ -348,6 +437,7 @@ export default function ArticleEditor({
           </p>
         </div>
       </div>
+      )}
     </div>
   );
 }
