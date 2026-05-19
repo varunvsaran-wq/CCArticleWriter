@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Bookmark, ChevronDown, ChevronUp, Pencil, Trash2, Check, X, RotateCcw } from "lucide-react";
+import { Bookmark, ChevronDown, ChevronUp, Pencil, Trash2, Check, X } from "lucide-react";
 
 function timeAgo(iso) {
   const diff = Date.now() - new Date(iso).getTime();
@@ -20,39 +20,62 @@ function VersionItem({ version, isCurrent, onRestore, onRename, onDelete }) {
     setEditing(false);
   };
 
+  // Stop the row-level click handler from firing when interacting with inner controls
+  const stop = (e) => e.stopPropagation();
+
+  const handleCardClick = () => {
+    if (editing || isCurrent) return;
+    onRestore(version.id);
+  };
+
+  const handleKeyDown = (e) => {
+    if (editing || isCurrent) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onRestore(version.id);
+    }
+  };
+
   return (
     <div
+      role={isCurrent ? undefined : "button"}
+      tabIndex={isCurrent ? -1 : 0}
+      onClick={handleCardClick}
+      onKeyDown={handleKeyDown}
+      title={isCurrent ? "Current version" : "Click to switch to this version"}
       className={`group rounded-lg border px-3 py-2.5 transition-colors ${
         isCurrent
-          ? "border-indigo-300 bg-indigo-50"
-          : "border-gray-200 bg-white hover:border-gray-300"
-      }`}
+          ? "border-indigo-300 bg-indigo-50 cursor-default"
+          : "border-gray-200 bg-white hover:border-indigo-300 hover:bg-indigo-50/40 cursor-pointer"
+      } focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500`}
     >
       <div className="flex items-start gap-2">
         {/* Current indicator */}
         <span
           className={`mt-1 w-2 h-2 rounded-full flex-shrink-0 ${
-            isCurrent ? "bg-indigo-500" : "bg-gray-200"
+            isCurrent ? "bg-indigo-500" : "bg-gray-200 group-hover:bg-indigo-300"
           }`}
         />
 
         <div className="flex-1 min-w-0">
           {editing ? (
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1" onClick={stop}>
               <input
                 autoFocus
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
+                onClick={stop}
                 onKeyDown={(e) => {
+                  e.stopPropagation();
                   if (e.key === "Enter") commitRename();
                   if (e.key === "Escape") setEditing(false);
                 }}
                 className="flex-1 text-xs border border-indigo-300 rounded px-1.5 py-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
               />
-              <button onClick={commitRename} className="text-green-600 hover:text-green-800">
+              <button onClick={(e) => { stop(e); commitRename(); }} className="text-green-600 hover:text-green-800">
                 <Check size={12} />
               </button>
-              <button onClick={() => setEditing(false)} className="text-gray-400 hover:text-gray-600">
+              <button onClick={(e) => { stop(e); setEditing(false); }} className="text-gray-400 hover:text-gray-600">
                 <X size={12} />
               </button>
             </div>
@@ -66,7 +89,8 @@ function VersionItem({ version, isCurrent, onRestore, onRename, onDelete }) {
                 {version.name}
               </p>
               <button
-                onClick={() => { setDraft(version.name); setEditing(true); }}
+                onClick={(e) => { stop(e); setDraft(version.name); setEditing(true); }}
+                title="Rename"
                 className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-gray-600 flex-shrink-0"
               >
                 <Pencil size={10} />
@@ -85,18 +109,14 @@ function VersionItem({ version, isCurrent, onRestore, onRename, onDelete }) {
           )}
         </div>
 
-        {/* Actions (shown on hover for non-current) */}
-        <div className={`flex gap-1 flex-shrink-0 ${isCurrent ? "invisible" : "opacity-0 group-hover:opacity-100"}`}>
+        {/* Delete action — shown on hover */}
+        <div className="flex gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100">
           <button
-            onClick={() => onRestore(version.id)}
-            title="Restore this version"
-            className="text-indigo-500 hover:text-indigo-700"
-          >
-            <RotateCcw size={12} />
-          </button>
-          <button
-            onClick={() => onDelete(version.id)}
-            title="Delete"
+            onClick={(e) => {
+              stop(e);
+              if (window.confirm(`Delete "${version.name}"?`)) onDelete(version.id);
+            }}
+            title="Delete version"
             className="text-gray-300 hover:text-red-500"
           >
             <Trash2 size={12} />
