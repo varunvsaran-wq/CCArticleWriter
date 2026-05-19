@@ -199,18 +199,23 @@ special_requirements: {brief.special_requirements or 'none'}
         if not sections:
             sections = [{"title": "Article", "index": 1}]
 
-        tasks = [
-            run_writer(
-                section_title=s["title"],
-                section_index=s["index"],
-                output_path=f"draft/section_{s['index']:02d}.md",
-                tone=self.brief.tone,
-                tool_impls=self.tool_impls,
-                on_log=self.make_logger(f"writer_s{s['index']}"),
-            )
-            for s in sections
-        ]
-        await asyncio.gather(*tasks)
+        # Cap concurrency to avoid hammering Sonnet's per-minute rate limit when
+        # there are 5+ sections. 3 in flight is the sweet spot — fast enough to
+        # feel parallel, slow enough to leave headroom for retries.
+        sem = asyncio.Semaphore(3)
+
+        async def bounded(s):
+            async with sem:
+                await run_writer(
+                    section_title=s["title"],
+                    section_index=s["index"],
+                    output_path=f"draft/section_{s['index']:02d}.md",
+                    tone=self.brief.tone,
+                    tool_impls=self.tool_impls,
+                    on_log=self.make_logger(f"writer_s{s['index']}"),
+                )
+
+        await asyncio.gather(*(bounded(s) for s in sections))
 
         # Assemble draft
         draft_parts = []

@@ -1,7 +1,7 @@
 import json
 from typing import Optional, Callable
 
-from .base import get_client, call_with_retry
+from .base import get_client, call_with_retry, cached_system
 from .style_guide import ANTI_AI_VOICE_GUIDE
 from ..tools.web_search import web_search
 from ..tools.web_fetch import web_fetch
@@ -160,13 +160,16 @@ async def run_reviser(
         }
     ]
 
-    for _ in range(30):
-        response = await client.messages.create(
+    system_blocks = cached_system(SYSTEM_PROMPT)
+
+    for _ in range(20):
+        response = await call_with_retry(
+            client,
             model="claude-sonnet-4-6",
-            system=SYSTEM_PROMPT,
+            system=system_blocks,
             messages=messages,
             tools=tools,
-            max_tokens=16000,
+            max_tokens=8000,
         )
 
         if response.stop_reason == "tool_use":
@@ -281,12 +284,13 @@ async def run_selection_reviser(
 
     messages: list[dict] = [{"role": "user", "content": user_msg}]
     tools = [SELECTION_SUBMIT_TOOL]
+    system_blocks = cached_system(SELECTION_SYSTEM_PROMPT)
 
     for _ in range(6):
         response = await call_with_retry(
             client,
             model="claude-sonnet-4-6",
-            system=SELECTION_SYSTEM_PROMPT,
+            system=system_blocks,
             messages=messages,
             tools=tools,
             max_tokens=4000,

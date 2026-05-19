@@ -15,11 +15,7 @@ def get_client() -> anthropic.AsyncAnthropic:
 
 
 async def call_with_retry(client: anthropic.AsyncAnthropic, **kwargs):
-    """Call client.messages.create with exponential backoff on transient errors.
-
-    Retries on: rate limits, connection errors, and 5xx responses.
-    Total wait across retries: ~31s (1, 2, 4, 8, 16).
-    """
+    """messages.create with exponential backoff on transient errors (~31s total)."""
     delays = [1, 2, 4, 8, 16]
     last_exc: Exception | None = None
     for attempt in range(len(delays) + 1):
@@ -38,6 +34,63 @@ async def call_with_retry(client: anthropic.AsyncAnthropic, **kwargs):
             await asyncio.sleep(delays[attempt])
     assert last_exc is not None
     raise last_exc
+
+
+def cached_system(prompt: str) -> list[dict]:
+    """Wrap a system prompt as a content-block list with an ephemeral cache breakpoint.
+
+    The first call writes the cache (~1.25x cost). Subsequent calls within ~5min
+    hit the cache (~0.1x cost). Effective for agents that iterate many times.
+    """
+    return [{
+        "type": "text",
+        "text": prompt,
+        "cache_control": {"type": "ephemeral"},
+    }]
+
+
+def _truncate_tool_history(messages: list[dict], keep_recent: int = 3) -> list[dict]:
+    """Stub tool_result payloads older than the last `keep_recent` tool turns.
+
+    The researcher loop accumulates large fetched-page payloads across iterations
+    — each iteration re-sends the full conversation, so old fetch results inflate
+    input tokens quadratically. Once the model has used a result and moved on,
+    we don't need to re-send the full text.
+
+    Only touches `tool_result` blocks in user messages. Leaves `tool_use` blocks
+    in assistant messages and any `server_tool_use` / `web_search_tool_result`
+    blocks (from native server tools) untouched — those must stay intact.
+    """
+    tool_result_idxs = [
+        i for i, m in enumerate(messages)
+        if m.get("role") == "user" and isinstance(m.get("content"), list)
+        and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in m["content"])
+    ]
+    if len(tool_result_idxs) <= keep_recent:
+        return messages
+
+    to_truncate = set(tool_result_idxs[:-keep_recent])
+    new_messages: list[dict] = []
+    for i, msg in enumerate(messages):
+        if i not in to_truncate:
+            new_messages.append(msg)
+            continue
+        new_content = []
+        for b in msg["content"]:
+            if (
+                isinstance(b, dict)
+                and b.get("type") == "tool_result"
+                and isinstance(b.get("content"), str)
+                and len(b["content"]) > 200
+            ):
+                new_content.append({
+                    **b,
+                    "content": f"[truncated: {len(b['content'])} chars from an earlier tool call]",
+                })
+            else:
+                new_content.append(b)
+        new_messages.append({**msg, "content": new_content})
+    return new_messages
 
 
 TOOL_SCHEMAS: dict[str, dict] = {
@@ -66,10 +119,18 @@ TOOL_SCHEMAS: dict[str, dict] = {
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "The URL to fetch"},
-                "max_length": {"type": "integer", "description": "Max chars to return (default 8000)", "default": 8000},
+                "max_length": {"type": "integer", "description": "Max chars to return (default 3000)", "default": 3000},
             },
             "required": ["url"],
         },
+    },
+    # Anthropic-native server-side search. Claude runs search + fetch on the
+    # server and includes results inline in the response. We don't need to
+    # respond to these; just keep the response.content blocks in history.
+    "web_search_native": {
+        "type": "web_search_20260209",
+        "name": "web_search",
+        "max_uses": 8,
     },
     "read_file": {
         "name": "read_file",
@@ -121,7 +182,7 @@ async def run_agent(
     tool_names: list[str],
     tool_impls: dict[str, Callable[..., Awaitable[str]]],
     model: str = "claude-sonnet-4-6",
-    max_iterations: int = 40,
+    max_iterations: int = 25,
     on_log: Callable[[str], Awaitable[None]] | None = None,
 ) -> str:
     client = get_client()
@@ -129,14 +190,17 @@ async def run_agent(
     messages: list[dict] = [{"role": "user", "content": user_message}]
     last_text = ""
 
+    # Cache the (frozen) system prompt so the per-iteration token bill is paid once
+    system_blocks = cached_system(system_prompt)
+
     for _ in range(max_iterations):
         response = await call_with_retry(
             client,
             model=model,
-            system=system_prompt,
-            messages=messages,
+            system=system_blocks,
+            messages=_truncate_tool_history(messages),
             tools=tools,
-            max_tokens=8096,
+            max_tokens=4096,
         )
 
         for block in response.content:
@@ -146,13 +210,19 @@ async def run_agent(
         if response.stop_reason == "end_turn":
             return last_text
 
+        # Server-side tools (native web_search) hit their server-side iteration
+        # cap → re-send the conversation and the server continues automatically.
+        if response.stop_reason == "pause_turn":
+            messages.append({"role": "assistant", "content": response.content})
+            continue
+
         if response.stop_reason == "tool_use":
             tool_results = []
             finished = False
 
             for block in response.content:
                 if block.type != "tool_use":
-                    continue
+                    continue  # skip server_tool_use / web_search_tool_result
 
                 name = block.name
                 inp = block.input
@@ -179,7 +249,8 @@ async def run_agent(
                 })
 
             messages.append({"role": "assistant", "content": response.content})
-            messages.append({"role": "user", "content": tool_results})
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
 
             if finished:
                 return last_text

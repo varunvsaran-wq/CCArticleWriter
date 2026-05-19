@@ -11,7 +11,7 @@ HEADERS = {
 }
 
 
-async def web_fetch(url: str, max_length: int = 8000) -> str:
+async def web_fetch(url: str, max_length: int = 3000) -> str:
     try:
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             response = await client.get(url, headers=HEADERS)

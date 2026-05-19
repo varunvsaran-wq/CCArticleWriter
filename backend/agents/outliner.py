@@ -1,6 +1,6 @@
 import json
 
-from .base import get_client, call_with_retry, TOOL_SCHEMAS
+from .base import get_client, call_with_retry, TOOL_SCHEMAS, cached_system
 
 SYSTEM_PROMPT = """\
 You are an Outline Agent. You design the structure of an article — you do not write prose.
@@ -118,14 +118,16 @@ async def run_outliner(brief_summary: str, content_type: str, tool_impls: dict, 
 
     outline: dict | None = None
 
-    for _ in range(20):
+    system_blocks = cached_system(SYSTEM_PROMPT)
+
+    for _ in range(12):
         response = await call_with_retry(
             client,
             model="claude-sonnet-4-6",
-            system=SYSTEM_PROMPT,
+            system=system_blocks,
             messages=messages,
             tools=tools,
-            max_tokens=8096,
+            max_tokens=4096,
         )
 
         if response.stop_reason == "tool_use":

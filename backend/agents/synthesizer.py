@@ -1,7 +1,7 @@
 import json
 from typing import Callable
 
-from .base import get_client, call_with_retry, TOOL_SCHEMAS
+from .base import get_client, call_with_retry, TOOL_SCHEMAS, cached_system
 
 SYSTEM_PROMPT = """\
 You are a Synthesis Agent. You read all research files and submit a structured
@@ -113,14 +113,16 @@ async def run_synthesizer(tool_impls: dict, on_log=None) -> dict:
 
     result: dict | None = None
 
-    for _ in range(30):
+    system_blocks = cached_system(SYSTEM_PROMPT)
+
+    for _ in range(20):
         response = await call_with_retry(
             client,
             model="claude-sonnet-4-6",
-            system=SYSTEM_PROMPT,
+            system=system_blocks,
             messages=messages,
             tools=tools,
-            max_tokens=8096,
+            max_tokens=4096,
         )
 
         if response.stop_reason == "tool_use":

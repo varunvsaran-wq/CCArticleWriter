@@ -71,7 +71,7 @@ async def run_editor(tool_impls: dict, on_log=None) -> None:
         user_message="Review and finalize the article. Pay special attention to the VOICE guide.",
         tool_names=["read_file", "write_file", "list_files", "finish"],
         tool_impls=tool_impls,
-        model="claude-opus-4-7",
-        max_iterations=30,
+        model="claude-sonnet-4-6",
+        max_iterations=15,
         on_log=on_log,
     )
