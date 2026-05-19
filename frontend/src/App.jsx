@@ -24,6 +24,7 @@ export default function App() {
     autoSave,
     addRevision,
     saveEdit,
+    promoteAutosave,
     restoreVersion,
     renameVersion,
     deleteVersion,
@@ -67,7 +68,14 @@ export default function App() {
   };
 
   const handleSaveVersion = (name) => {
-    if (workingArticle) saveVersion(workingArticle, name);
+    // If there's a pending autosave, promote it into a named version
+    // (avoids duplicating identical content). Otherwise snapshot the working article.
+    const hasAutosave = versions.some((v) => v.kind === "autosave");
+    if (hasAutosave) {
+      promoteAutosave(name);
+    } else if (workingArticle) {
+      saveVersion(workingArticle, name);
+    }
   };
 
   const handleReset = () => {

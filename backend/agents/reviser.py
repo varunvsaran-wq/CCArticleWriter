@@ -1,7 +1,7 @@
 import json
 from typing import Optional, Callable
 
-from .base import get_client
+from .base import get_client, call_with_retry
 from .style_guide import ANTI_AI_VOICE_GUIDE
 from ..tools.web_search import web_search
 from ..tools.web_fetch import web_fetch
@@ -211,3 +211,102 @@ async def run_reviser(
             return text or content, json.loads(sources_json)
 
     return content, json.loads(sources_json)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Selection-scoped revision
+# ──────────────────────────────────────────────────────────────────────
+
+SELECTION_SYSTEM_PROMPT = f"""\
+You are a Selection Revision Agent. The user highlighted a specific span of
+text inside an article and wants you to apply an instruction to ONLY that span.
+
+## INPUTS
+
+- SELECTION: the exact text the user highlighted (the only thing you rewrite)
+- INSTRUCTION: what to do with the selection
+- CONTEXT_BEFORE / CONTEXT_AFTER: surrounding text — read to match tone and flow,
+  but DO NOT include any of it in your output
+- SOURCES: the article's source list. Citations are [N] markers; the valid Ns are
+  the ones the article already uses. Do not invent new citations — if you need to
+  remove a claim, drop its [N] marker too.
+
+## RULES
+
+- Output ONLY the revised selection. Nothing else. No preamble, no quotes, no labels.
+- Match the surrounding context's voice, tense, and rhythm.
+- Preserve [N] citation markers from the selection unless the instruction
+  explicitly removes the cited claim.
+- Do NOT introduce headings, lists, or block elements unless the original
+  selection had them. Keep the result inline-replaceable.
+- Apply the VOICE guide rigorously to the rewrite.
+
+{ANTI_AI_VOICE_GUIDE}
+"""
+
+SELECTION_SUBMIT_TOOL = {
+    "name": "submit_selection",
+    "description": "Submit the revised selection text. Call exactly once when done.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "text": {
+                "type": "string",
+                "description": "The revised selection. Just the replacement text — no surrounding context.",
+            },
+        },
+        "required": ["text"],
+    },
+}
+
+
+async def run_selection_reviser(
+    selection: str,
+    instruction: str,
+    sources_json: str,
+    context_before: str = "",
+    context_after: str = "",
+) -> str:
+    """Revise just the highlighted selection. Returns the replacement text."""
+    client = get_client()
+
+    user_msg = (
+        f"SOURCES (JSON): {sources_json}\n\n"
+        f"CONTEXT_BEFORE:\n{context_before}\n\n"
+        f"---SELECTION START---\n{selection}\n---SELECTION END---\n\n"
+        f"CONTEXT_AFTER:\n{context_after}\n\n"
+        f"INSTRUCTION: {instruction}\n\n"
+        "Rewrite ONLY the selection between the markers. Submit via submit_selection()."
+    )
+
+    messages: list[dict] = [{"role": "user", "content": user_msg}]
+    tools = [SELECTION_SUBMIT_TOOL]
+
+    for _ in range(6):
+        response = await call_with_retry(
+            client,
+            model="claude-sonnet-4-6",
+            system=SELECTION_SYSTEM_PROMPT,
+            messages=messages,
+            tools=tools,
+            max_tokens=4000,
+        )
+
+        if response.stop_reason == "tool_use":
+            for block in response.content:
+                if block.type == "tool_use" and block.name == "submit_selection":
+                    return block.input.get("text", selection)
+
+            # Echo tool results back if we somehow got here (shouldn't happen with only submit_selection)
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": b.id, "content": "Ok."}
+                            for b in response.content if b.type == "tool_use"],
+            })
+        else:
+            # Fall back to the assistant's text if it didn't use the tool
+            text = "".join(b.text for b in response.content if hasattr(b, "text"))
+            return text.strip() or selection
+
+    return selection

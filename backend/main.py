@@ -11,7 +11,7 @@ from typing import Optional
 
 from .models.schemas import ArticleBrief, Source
 from .pipeline.runner import PipelineRunner
-from .agents.reviser import run_reviser
+from .agents.reviser import run_reviser, run_selection_reviser
 
 app = FastAPI(title="Article Writer API")
 
@@ -72,15 +72,30 @@ class ReviseRequest(BaseModel):
     topic: Optional[str] = ""
     job_id: Optional[str] = None
     section_scope: Optional[str] = None  # exact section title to scope edits to
+    selection: Optional[str] = None      # highlighted text to revise in place
+    context_before: Optional[str] = None # text immediately before the selection
+    context_after: Optional[str] = None  # text immediately after the selection
 
 
 @app.post("/api/revise")
 async def revise_article(request: ReviseRequest):
     sources_json = json.dumps([s.model_dump() for s in request.sources])
 
-    # If we still hold the originating job's runner in memory, lend the
-    # reviser its file tools so it can read research/synthesis files
-    # instead of re-searching the web from scratch.
+    # Selection mode: revise only the highlighted snippet, frontend splices result back
+    if request.selection:
+        revised_text = await run_selection_reviser(
+            selection=request.selection,
+            instruction=request.instruction,
+            sources_json=sources_json,
+            context_before=request.context_before or "",
+            context_after=request.context_after or "",
+        )
+        return {
+            "mode": "selection",
+            "selection_text": revised_text,
+        }
+
+    # Full-article or section-scoped revision
     read_file = None
     list_files = None
     if request.job_id:
@@ -98,6 +113,7 @@ async def revise_article(request: ReviseRequest):
         list_files=list_files,
     )
     return {
+        "mode": "full",
         "content": revised_content,
         "sources": revised_sources,
         "word_count": len(revised_content.split()),

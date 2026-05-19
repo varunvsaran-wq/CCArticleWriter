@@ -5,7 +5,7 @@ import Placeholder from "@tiptap/extension-placeholder";
 import { Extension } from "@tiptap/core";
 import { Plugin } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
-import { useEffect, useImperativeHandle, forwardRef, useRef } from "react";
+import { useEffect, useImperativeHandle, forwardRef, useRef, useState } from "react";
 import EditorToolbar from "./EditorToolbar";
 import { markdownToHtml, htmlToMarkdown } from "../utils/markdown";
 
@@ -44,7 +44,14 @@ const CitationDecoration = Extension.create({
 });
 
 const RichTextEditor = forwardRef(function RichTextEditor(
-  { initialMarkdown, onDirtyChange, onMarkdownChange, placeholder = "Start writing…", readOnly = false },
+  {
+    initialMarkdown,
+    onDirtyChange,
+    onMarkdownChange,
+    onSelectionChange,
+    placeholder = "Start writing…",
+    readOnly = false,
+  },
   ref
 ) {
   // Tracks markdown the parent has already seen, so re-syncing external content
@@ -79,6 +86,16 @@ const RichTextEditor = forwardRef(function RichTextEditor(
         onMarkdownChange(md);
       }
     },
+    onSelectionUpdate: ({ editor }) => {
+      if (!onSelectionChange) return;
+      const { from, to, empty } = editor.state.selection;
+      if (empty) {
+        onSelectionChange(null);
+        return;
+      }
+      const text = editor.state.doc.textBetween(from, to, "\n", " ");
+      onSelectionChange({ from, to, text });
+    },
   });
 
   // External markdown changes (version restore, applied revision) flow back in here.
@@ -99,6 +116,33 @@ const RichTextEditor = forwardRef(function RichTextEditor(
       getMarkdown: () => (editor ? htmlToMarkdown(editor.getHTML()) : ""),
       isEmpty: () => editor?.isEmpty ?? true,
       focus: () => editor?.commands.focus(),
+      getSelection: () => {
+        if (!editor) return null;
+        const { from, to, empty } = editor.state.selection;
+        if (empty) return null;
+        const text = editor.state.doc.textBetween(from, to, "\n", " ");
+        return { from, to, text };
+      },
+      getContextAround: (from, to, chars = 400) => {
+        if (!editor) return { before: "", after: "" };
+        const docSize = editor.state.doc.content.size;
+        const beforeFrom = Math.max(0, from - chars);
+        const afterTo = Math.min(docSize, to + chars);
+        return {
+          before: editor.state.doc.textBetween(beforeFrom, from, "\n", " "),
+          after: editor.state.doc.textBetween(to, afterTo, "\n", " "),
+        };
+      },
+      replaceRange: (from, to, text) => {
+        if (!editor) return;
+        editor
+          .chain()
+          .focus()
+          .insertContentAt({ from, to }, text, {
+            parseOptions: { preserveWhitespace: "full" },
+          })
+          .run();
+      },
     }),
     [editor]
   );

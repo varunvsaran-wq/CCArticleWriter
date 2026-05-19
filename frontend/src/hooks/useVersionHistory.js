@@ -10,11 +10,9 @@ function makeVersion(article, name, instruction = null, auto = false, kind = "sn
     savedAt: new Date().toISOString(),
     instruction,
     auto,
-    kind, // "snapshot" | "auto-before" | "auto-after" | "manual-edit"
+    kind, // "snapshot" | "auto-before" | "auto-after" | "autosave"
   };
 }
-
-const MANUAL_EDIT_WINDOW_MS = 2 * 60 * 1000; // collapse rapid edits into one version
 
 function storageKey(articleId) {
   return `article-versions-${articleId}`;
@@ -91,41 +89,54 @@ export function useVersionHistory() {
   }, [_setAndPersist]);
 
   /**
-   * Save a direct manual edit. Collapses rapid edits: if the latest version
-   * is a manual edit younger than MANUAL_EDIT_WINDOW_MS, update it in place
-   * instead of appending a new version.
+   * Save a direct manual edit. There is at most ONE autosave entry — it is
+   * updated in place and floated to the end of the list. To preserve an
+   * autosave snapshot, the user calls saveVersion() (or promoteAutosave).
    */
   const saveEdit = useCallback((article) => {
-    let appendedId = null;
+    let savedId = null;
     _setAndPersist((prev) => {
-      const last = prev[prev.length - 1];
-      const lastIsRecentEdit =
-        last &&
-        last.kind === "manual-edit" &&
-        Date.now() - new Date(last.savedAt).getTime() < MANUAL_EDIT_WINDOW_MS;
+      const existing = prev.find((v) => v.kind === "autosave");
+      const withoutAutosave = prev.filter((v) => v.kind !== "autosave");
 
-      if (lastIsRecentEdit) {
-        const updated = {
-          ...last,
-          content: article.content,
-          sources: article.sources,
-          word_count: article.word_count,
-          savedAt: new Date().toISOString(),
-        };
-        appendedId = updated.id;
-        return [...prev.slice(0, -1), updated];
-      }
+      const entry = existing
+        ? {
+            ...existing,
+            content: article.content,
+            sources: article.sources,
+            word_count: article.word_count,
+            savedAt: new Date().toISOString(),
+          }
+        : makeVersion(article, "Autosave", null, true, "autosave");
 
-      const timeLabel = new Date().toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-      const v = makeVersion(article, `Edit at ${timeLabel}`, null, true, "manual-edit");
-      appendedId = v.id;
-      return [...prev, v];
+      savedId = entry.id;
+      return [...withoutAutosave, entry];
     });
-    if (appendedId) setCurrentId(appendedId);
-    return appendedId;
+    if (savedId) setCurrentId(savedId);
+    return savedId;
+  }, [_setAndPersist]);
+
+  /**
+   * Promote the current autosave into a named, permanent version.
+   * Clears the autosave slot so a fresh one is created on the next edit.
+   */
+  const promoteAutosave = useCallback((name) => {
+    let promotedId = null;
+    _setAndPersist((prev) => {
+      const autosave = prev.find((v) => v.kind === "autosave");
+      if (!autosave) return prev;
+      const promoted = {
+        ...autosave,
+        id: crypto.randomUUID(),
+        name: name || `Saved at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
+        kind: "snapshot",
+        auto: false,
+      };
+      promotedId = promoted.id;
+      return [...prev.filter((v) => v.kind !== "autosave"), promoted];
+    });
+    if (promotedId) setCurrentId(promotedId);
+    return promotedId;
   }, [_setAndPersist]);
 
   const restoreVersion = useCallback((id) => {
@@ -156,6 +167,7 @@ export function useVersionHistory() {
     autoSave,
     addRevision,
     saveEdit,
+    promoteAutosave,
     restoreVersion,
     renameVersion,
     deleteVersion,

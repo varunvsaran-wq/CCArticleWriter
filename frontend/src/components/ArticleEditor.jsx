@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
-import { Send, Loader2, AlertCircle, ChevronDown } from "lucide-react";
+import { Send, Loader2, AlertCircle, ChevronDown, Highlighter } from "lucide-react";
 import RichTextEditor from "./RichTextEditor";
 import SourcesPanel from "./SourcesPanel";
 import {
@@ -37,6 +37,9 @@ export default function ArticleEditor({
 
   const [instruction, setInstruction] = useState("");
   const [sectionScope, setSectionScope] = useState("");
+  // scope kinds: "whole" | "section" | "selection". Derived from sectionScope + selection.
+  const [selection, setSelection] = useState(null); // { from, to, text } | null
+  const [useSelection, setUseSelection] = useState(false); // user explicitly chose selection scope
   const [isRevising, setIsRevising] = useState(false);
   const [revisionError, setRevisionError] = useState(null);
   const [autosaveState, setAutosaveState] = useState("idle"); // idle | pending | saved
@@ -56,6 +59,11 @@ export default function ArticleEditor({
       setSectionScope("");
     }
   }, [sections, sectionScope]);
+
+  // If the user clears their selection, drop selection scope
+  useEffect(() => {
+    if (!selection) setUseSelection(false);
+  }, [selection]);
 
   // Auto-resize the revision textarea
   useEffect(() => {
@@ -113,11 +121,41 @@ export default function ArticleEditor({
     const trimmed = instruction.trim();
     if (!trimmed || isRevising) return;
 
-    // Make sure we send the freshest content (flush pending auto-save)
+    // Flush pending auto-save and grab freshest content
     const flushed = flushPendingEdit();
     const currentBody = editorRef.current?.getMarkdown() ?? body;
     const currentContent =
       flushed ?? reassemble(currentBody, article.sources, citationStyle);
+
+    // Build payload based on active scope
+    const isSelectionMode = useSelection && selection && selection.text.trim();
+    let payload;
+    if (isSelectionMode) {
+      const { before, after } = editorRef.current?.getContextAround(
+        selection.from,
+        selection.to,
+        500
+      ) ?? { before: "", after: "" };
+      payload = {
+        instruction: trimmed,
+        content: currentContent,
+        sources: article.sources,
+        topic: article.title,
+        job_id: jobId || null,
+        selection: selection.text,
+        context_before: before,
+        context_after: after,
+      };
+    } else {
+      payload = {
+        instruction: trimmed,
+        content: currentContent,
+        sources: article.sources,
+        topic: article.title,
+        job_id: jobId || null,
+        section_scope: sectionScope || null,
+      };
+    }
 
     setIsRevising(true);
     setRevisionError(null);
@@ -126,14 +164,7 @@ export default function ArticleEditor({
       const res = await fetch("/api/revise", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          instruction: trimmed,
-          content: currentContent,
-          sources: article.sources,
-          topic: article.title,
-          job_id: jobId || null,
-          section_scope: sectionScope || null,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!res.ok) {
@@ -142,16 +173,30 @@ export default function ArticleEditor({
       }
 
       const data = await res.json();
-      const scopeLabel = sectionScope ? `[${sectionScope}] ` : "";
-      onRevisionComplete(
-        {
-          ...article,
-          content: data.content,
-          sources: data.sources,
-          word_count: data.word_count,
-        },
-        scopeLabel + trimmed
-      );
+
+      if (data.mode === "selection") {
+        // Splice the revised snippet back in place. TipTap's onUpdate will fire,
+        // which feeds the new body into our debounced auto-save naturally.
+        editorRef.current?.replaceRange(selection.from, selection.to, data.selection_text);
+        onRevisionComplete?.(
+          { ...article }, // article state updates via auto-save; just signal "revision happened"
+          `[selection] ${trimmed}`
+        );
+        setUseSelection(false);
+        setSelection(null);
+      } else {
+        const scopeLabel = sectionScope ? `[${sectionScope}] ` : "";
+        onRevisionComplete(
+          {
+            ...article,
+            content: data.content,
+            sources: data.sources,
+            word_count: data.word_count,
+          },
+          scopeLabel + trimmed
+        );
+      }
+
       setInstruction("");
     } catch (err) {
       setRevisionError(err.message);
@@ -203,6 +248,7 @@ export default function ArticleEditor({
           ref={editorRef}
           initialMarkdown={body}
           onMarkdownChange={handleMarkdownChange}
+          onSelectionChange={setSelection}
         />
 
         <SourcesPanel sources={article.sources} citationStyle={citationStyle} />
@@ -217,16 +263,46 @@ export default function ArticleEditor({
           </div>
         )}
 
+        {/* Selection indicator banner — appears whenever the user has text highlighted */}
+        {selection && (
+          <div
+            className={`flex items-center gap-2 text-xs mb-2 rounded-lg px-3 py-2 border ${
+              useSelection
+                ? "bg-indigo-50 border-indigo-200 text-indigo-800"
+                : "bg-amber-50 border-amber-200 text-amber-800"
+            }`}
+          >
+            <Highlighter size={12} className="flex-shrink-0" />
+            <span className="flex-1 truncate">
+              {useSelection ? "Editing selected text: " : "Selected: "}
+              <span className="italic opacity-80">
+                "{selection.text.slice(0, 80)}{selection.text.length > 80 ? "…" : ""}"
+              </span>
+              <span className="opacity-60 ml-1">({selection.text.length} chars)</span>
+            </span>
+            <button
+              onClick={() => setUseSelection((v) => !v)}
+              className={`text-[10px] font-medium px-2 py-0.5 rounded transition-colors ${
+                useSelection
+                  ? "bg-indigo-600 text-white hover:bg-indigo-700"
+                  : "bg-white border border-amber-300 text-amber-700 hover:bg-amber-100"
+              }`}
+            >
+              {useSelection ? "Editing selection" : "Edit selection only"}
+            </button>
+          </div>
+        )}
+
         <div className="flex items-end gap-2">
-          {/* Section scope dropdown */}
+          {/* Section scope dropdown — disabled in selection mode */}
           {sections.length > 0 && (
             <div className="relative flex-shrink-0">
               <select
                 value={sectionScope}
                 onChange={(e) => setSectionScope(e.target.value)}
-                disabled={isRevising}
-                className="appearance-none bg-white border border-gray-300 rounded-lg pl-2.5 pr-7 py-2.5 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer max-w-[140px] truncate"
-                title="Scope of the revision"
+                disabled={isRevising || useSelection}
+                className="appearance-none bg-white border border-gray-300 rounded-lg pl-2.5 pr-7 py-2.5 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer max-w-[140px] truncate disabled:opacity-50 disabled:cursor-not-allowed"
+                title={useSelection ? "Disabled while editing a selection" : "Scope of the revision"}
               >
                 <option value="">Whole article</option>
                 {sections.map((s) => (
@@ -259,13 +335,16 @@ export default function ArticleEditor({
 
         <div className="flex items-center justify-between mt-1.5">
           <p className="text-[10px] text-gray-400">
-            {sectionScope
+            {useSelection && selection
+              ? `Revising selected text (${selection.text.length} chars)`
+              : sectionScope
               ? `Revising only "${sectionScope}"`
-              : "Revising the whole article"} · <kbd className="font-sans">⌘</kbd>+<kbd className="font-sans">↵</kbd> to send
+              : "Revising the whole article"}{" "}
+            · <kbd className="font-sans">⌘</kbd>+<kbd className="font-sans">↵</kbd> to send
           </p>
           <p className="text-[10px] text-gray-400 h-3">
-            {autosaveState === "pending" && "Saving edit…"}
-            {autosaveState === "saved" && "Edit saved"}
+            {autosaveState === "pending" && "Autosaving…"}
+            {autosaveState === "saved" && "Autosaved"}
           </p>
         </div>
       </div>
